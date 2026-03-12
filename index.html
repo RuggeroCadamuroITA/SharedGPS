@@ -48,6 +48,36 @@
 
       initMap();
       listenPartner();
+
+      if (key === "user_a") {
+        // Lui: posizione gia' su Firebase dall'app Android, non serve GPS browser
+        document.getElementById("btn-share").textContent = "📱 Posizione dall'app Android";
+        document.getElementById("btn-share").style.background = "var(--surface2)";
+        document.getElementById("btn-share").style.color = "var(--muted)";
+        document.getElementById("btn-share").disabled = true;
+        showStatus("📱 Posizione aggiornata dall'app", "ok");
+        listenMyPosition();
+      }
+    }
+
+    function listenMyPosition() {
+      onValue(ref(db, "session/" + USER_KEY), (snapshot) => {
+        const data = snapshot.val();
+        if (!data) { showStatus("⏳ In attesa posizione dall'app...", "warn"); return; }
+        myPos = { lat: data.lat, lng: data.lng };
+        showStatus("🟢 Posizione ricevuta dall'app", "ok");
+        const cfg = userConfig[USER_KEY];
+        if (!myMarker) {
+          myMarker = new google.maps.Marker({
+            position: myPos, map,
+            title: "Tu sei qui",
+            icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: cfg.color, fillOpacity: 1, strokeColor: "#ffffff", strokeWeight: 3 },
+            label: { text: cfg.emoji, fontSize: "16px" }
+          });
+        } else { myMarker.setPosition(myPos); }
+        updateMeetPoint();
+        fitBothMarkers();
+      });
     }
 
     // ── Init Google Maps ──────────────────────────────────────────
