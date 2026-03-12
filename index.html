@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SharedGPS</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getDatabase, ref, onValue, set, serverTimestamp }
+      from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+    // ============================================================
+    // ⚠️  INCOLLA QUI LA TUA CONFIGURAZIONE FIREBASE
+    // Console Firebase → Impostazioni progetto → Generali → scrollando in basso
+    // trovi "Configurazione SDK" → seleziona "Configurazione" e copia i valori
+    // ============================================================
+    const firebaseConfig = {
+      apiKey: "AIzaSyAYj6IvX_RSvN6ae760cLuvHB4vTekHPzA",
+      authDomain: "sharedgps-a8aff.firebaseapp.com",
+      databaseURL: "https://sharedgps-a8aff-default-rtdb.europe-west1.firebasedatabase.app",
+      projectId: "sharedgps-a8aff",
+      storageBucket: "sharedgps-a8aff.firebasestorage.app",
+      messagingSenderId: "429099604343",
+      appId: "1:429099604343:web:b49c590ccd4cf66ea96972"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    // ============================================================
+    // Stato globale
+    // ============================================================
+    let map, myMarker, partnerMarker, meetMarker, routeLayer;
+    let myPos = null, partnerPos = null;
+    let watchId = null;
+    let isSharing = false;
+
+    const USER_KEY = "user_b";        // lei usa il browser
+    const PARTNER_KEY = "user_a";     // lui è l'app Android
+
+    // Icone personalizzate
+    const iconMe = L.divIcon({
+      className: "",
+      html: `<div style="
+        width:36px;height:36px;border-radius:50%;
+        background:#4ade80;border:3px solid #fff;
+        box-shadow:0 2px 12px rgba(74,222,128,.6);
+        display:flex;align-items:center;justify-content:center;
+        font-size:18px;">👩</div>`,
+      iconSize: [36, 36], iconAnchor: [18, 18]
+    });
+
+    const iconPartner = L.divIcon({
+      className: "",
+      html: `<div style="
+        width:36px;height:36px;border-radius:50%;
+        background:#60a5fa;border:3px solid #fff;
+        box-shadow:0 2px 12px rgba(96,165,250,.6);
+        display:flex;align-items:center;justify-content:center;
+        font-size:18px;">👨</div>`,
+      iconSize: [36, 36], iconAnchor: [18, 18]
+    });
+
+    const iconMeet = L.divIcon({
+      className: "",
+      html: `<div style="
+        width:32px;height:32px;border-radius:50%;
+        background:#f59e0b;border:3px solid #fff;
+        box-shadow:0 2px 12px rgba(245,158,11,.6);
+        display:flex;align-items:center;justify-content:center;
+        font-size:16px;">⭐</div>`,
+      iconSize: [32, 32], iconAnchor: [16, 16]
+    });
+
+    // ============================================================
+    // Init mappa
+    // ============================================================
+    function initMap() {
+      map = L.map("map", { zoomControl: false }).setView([45.4654, 9.1859], 13);
+
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap",
+        maxZoom: 19
+      }).addTo(map);
+
+      L.control.zoom({ position: "bottomright" }).addTo(map);
+    }
+
+    // ============================================================
+    // Geolocalizzazione browser (lei)
+    // ============================================================
+    function startSharing() {
+      if (!navigator.geolocation) {
+        showStatus("❌ Geolocalizzazione non supportata dal browser", "error");
+        return;
+      }
+
+      isSharing = true;
+      document.getElementById("btn-share").textContent = "⏹ Smetti di condividere";
+      document.getElementById("btn-share").classList.add("active");
+      showStatus("🟢 Stai condividendo la tua posizione", "ok");
+
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          const accuracy = pos.coords.accuracy;
+
+          myPos = { lat, lng };
+
+          // Scrivi su Firebase
+          set(ref(db, `session/${USER_KEY}`), {
+            lat, lng, accuracy,
+            timestamp: Date.now()
+          });
+
+          // Aggiorna marker
+          if (!myMarker) {
+            myMarker = L.marker([lat, lng], { icon: iconMe })
+              .addTo(map)
+              .bindPopup("📍 Sei qui");
+          } else {
+            myMarker.setLatLng([lat, lng]);
+          }
+
+          updateMeetPoint();
+          fitBothMarkers();
+        },
+        (err) => showStatus(`❌ Errore GPS: ${err.message}`, "error"),
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+      );
+    }
+
+    function stopSharing() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      isSharing = false;
+      document.getElementById("btn-share").textContent = "📍 Condividi posizione";
+      document.getElementById("btn-share").classList.remove("active");
+      showStatus("⏸ Condivisione fermata", "warn");
+
+      // Rimuovi da Firebase
+      set(ref(db, `session/${USER_KEY}`), null);
+    }
+
+    // ============================================================
+    // Ascolta posizione partner (lui, Android)
+    // ============================================================
+    function listenPartner() {
+      onValue(ref(db, `session/${PARTNER_KEY}`), (snapshot) => {
+        const data = snapshot.val();
+        if (!data) {
+          document.getElementById("partner-status").textContent = "📵 Lui non sta condividendo";
+          if (partnerMarker) { map.removeLayer(partnerMarker); partnerMarker = null; }
+          partnerPos = null;
+          clearRoute();
+          return;
+        }
+
+        partnerPos = { lat: data.lat, lng: data.lng };
+        const ago = Math.round((Date.now() - data.timestamp) / 1000);
+        document.getElementById("partner-status").textContent =
+          `🔵 Lui — aggiornato ${ago < 10 ? "ora" : ago + "s fa"}`;
+
+        if (!partnerMarker) {
+          partnerMarker = L.marker([data.lat, data.lng], { icon: iconPartner })
+            .addTo(map)
+            .bindPopup("📍 Lui è qui");
+        } else {
+          partnerMarker.setLatLng([data.lat, data.lng]);
+        }
+
+        updateMeetPoint();
+        fitBothMarkers();
+        updateDistance();
+      });
+    }
+
+    // ============================================================
+    // Punto di incontro a metà strada + routing OSRM
+    // ============================================================
+    function updateMeetPoint() {
+      if (!myPos || !partnerPos) return;
+
+      const midLat = (myPos.lat + partnerPos.lat) / 2;
+      const midLng = (myPos.lng + partnerPos.lng) / 2;
+
+      if (!meetMarker) {
+        meetMarker = L.marker([midLat, midLng], { icon: iconMeet })
+          .addTo(map)
+          .bindPopup("⭐ Punto di incontro");
+      } else {
+        meetMarker.setLatLng([midLat, midLng]);
+      }
+
+      fetchRoute(myPos, partnerPos, midLat, midLng);
+    }
+
+    async function fetchRoute(me, partner, midLat, midLng) {
+      try {
+        // Percorso da lei al punto di incontro + da lui al punto di incontro
+        const urlMe = `https://router.project-osrm.org/route/v1/foot/${me.lng},${me.lat};${midLng},${midLat}?overview=full&geometries=geojson`;
+        const urlPartner = `https://router.project-osrm.org/route/v1/foot/${partner.lng},${partner.lat};${midLng},${midLat}?overview=full&geometries=geojson`;
+
+        const [resMe, resPartner] = await Promise.all([fetch(urlMe), fetch(urlPartner)]);
+        const [dataMe, dataPartner] = await Promise.all([resMe.json(), resPartner.json()]);
+
+        clearRoute();
+
+        if (dataMe.routes?.[0]) {
+          L.geoJSON(dataMe.routes[0].geometry, {
+            style: { color: "#4ade80", weight: 4, opacity: 0.8 }
+          }).addTo(map);
+
+          const mins = Math.ceil(dataMe.routes[0].duration / 60);
+          const dist = (dataMe.routes[0].distance / 1000).toFixed(1);
+          document.getElementById("my-eta").textContent = `👩 ${dist} km · ~${mins} min`;
+        }
+
+        if (dataPartner.routes?.[0]) {
+          L.geoJSON(dataPartner.routes[0].geometry, {
+            style: { color: "#60a5fa", weight: 4, opacity: 0.8 }
+          }).addTo(map);
+
+          const mins = Math.ceil(dataPartner.routes[0].duration / 60);
+          const dist = (dataPartner.routes[0].distance / 1000).toFixed(1);
+          document.getElementById("partner-eta").textContent = `👨 ${dist} km · ~${mins} min`;
+        }
+
+        routeLayer = true; // flag semplice
+      } catch (e) {
+        console.warn("Routing non disponibile:", e);
+      }
+    }
+
+    function clearRoute() {
+      if (routeLayer) {
+        map.eachLayer((layer) => {
+          if (layer instanceof L.GeoJSON) map.removeLayer(layer);
+        });
+        routeLayer = null;
+      }
+      document.getElementById("my-eta").textContent = "";
+      document.getElementById("partner-eta").textContent = "";
+    }
+
+    // ============================================================
+    // Helpers
+    // ============================================================
+    function fitBothMarkers() {
+      const markers = [myMarker, partnerMarker].filter(Boolean);
+      if (markers.length === 2) {
+        const group = L.featureGroup(markers);
+        map.fitBounds(group.getBounds().pad(0.3));
+      } else if (markers.length === 1) {
+        map.setView(markers[0].getLatLng(), 15);
+      }
+    }
+
+    function updateDistance() {
+      if (!myPos || !partnerPos) return;
+      const R = 6371000;
+      const dLat = (partnerPos.lat - myPos.lat) * Math.PI / 180;
+      const dLng = (partnerPos.lng - myPos.lng) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(myPos.lat*Math.PI/180) *
+                Math.cos(partnerPos.lat*Math.PI/180) * Math.sin(dLng/2)**2;
+      const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      const txt = dist < 1000 ? `${Math.round(dist)} m` : `${(dist/1000).toFixed(1)} km`;
+      document.getElementById("distance").textContent = `📏 Distanza: ${txt}`;
+    }
+
+    function showStatus(msg, type = "ok") {
+      const el = document.getElementById("my-status");
+      el.textContent = msg;
+      el.className = "status-badge " + type;
+    }
+
+    // ============================================================
+    // Boot
+    // ============================================================
+    window.addEventListener("DOMContentLoaded", () => {
+      initMap();
+      listenPartner();
+
+      document.getElementById("btn-share").addEventListener("click", () => {
+        if (isSharing) stopSharing(); else startSharing();
+      });
+
+      document.getElementById("btn-fit").addEventListener("click", fitBothMarkers);
+    });
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@500&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3348;
+      --green: #4ade80;
+      --blue: #60a5fa;
+      --amber: #f59e0b;
+      --red: #f87171;
+      --text: #e8eaf0;
+      --muted: #8891a8;
+    }
+
+    html, body { height: 100%; font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); overflow: hidden; }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+    }
+
+    /* Header */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      z-index: 100;
+    }
+
+    .logo {
+      font-family: 'DM Mono', monospace;
+      font-size: 15px;
+      font-weight: 500;
+      color: var(--green);
+      letter-spacing: -0.5px;
+    }
+
+    .logo span { color: var(--muted); }
+
+    /* Mappa */
+    #map {
+      flex: 1;
+      z-index: 1;
+    }
+
+    /* Panel inferiore */
+    #panel {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 14px 16px;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .status-badge {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 500;
+      background: var(--surface2);
+      color: var(--muted);
+    }
+    .status-badge.ok { background: rgba(74,222,128,.12); color: var(--green); }
+    .status-badge.error { background: rgba(248,113,113,.12); color: var(--red); }
+    .status-badge.warn { background: rgba(245,158,11,.12); color: var(--amber); }
+
+    #partner-status {
+      font-size: 12px;
+      color: var(--muted);
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: var(--surface2);
+    }
+
+    #distance {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+    }
+
+    .eta-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .eta-row span {
+      font-size: 12px;
+      font-family: 'DM Mono', monospace;
+      color: var(--muted);
+      background: var(--surface2);
+      padding: 4px 10px;
+      border-radius: 8px;
+    }
+
+    /* Bottoni */
+    .btn-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    button {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 12px;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s ease;
+    }
+
+    #btn-share {
+      background: var(--green);
+      color: #0a1a10;
+    }
+    #btn-share.active {
+      background: var(--red);
+      color: #1a0a0a;
+    }
+    #btn-share:active { transform: scale(.97); }
+
+    #btn-fit {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      flex: 0 0 48px;
+      font-size: 18px;
+      padding: 12px 8px;
+    }
+    #btn-fit:active { transform: scale(.97); }
+
+    /* Leaflet dark override */
+    .leaflet-tile-pane { filter: brightness(.85) saturate(.9); }
+    .leaflet-control-zoom a {
+      background: var(--surface) !important;
+      color: var(--text) !important;
+      border-color: var(--border) !important;
+    }
+    .leaflet-popup-content-wrapper {
+      background: var(--surface) !important;
+      color: var(--text) !important;
+      border: 1px solid var(--border);
+      border-radius: 10px !important;
+    }
+    .leaflet-popup-tip { background: var(--surface) !important; }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="logo">shared<span>gps</span></div>
+    <div style="flex:1"></div>
+    <div id="distance"></div>
+  </header>
+
+  <div id="map"></div>
+
+  <div id="panel">
+    <div class="row">
+      <span id="my-status" class="status-badge">⏳ Premi il bottone per condividere</span>
+      <span id="partner-status">📵 Lui non sta condividendo</span>
+    </div>
+    <div class="eta-row">
+      <span id="my-eta"></span>
+      <span id="partner-eta"></span>
+    </div>
+    <div class="btn-row">
+      <button id="btn-share">📍 Condividi posizione</button>
+      <button id="btn-fit" title="Centra mappa">⊹</button>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
