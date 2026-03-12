@@ -1,370 +1,404 @@
 <!DOCTYPE html>
 <html lang="it">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
   <title>SharedGPS</title>
-
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-    import { getDatabase, ref, onValue, set }
-      from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
-
-    const firebaseConfig = {
-      apiKey: "AIzaSyAYj6IvX_RSvN6ae760cLuvHB4vTekHPzA",
-      authDomain: "sharedgps-a8aff.firebaseapp.com",
-      databaseURL: "https://sharedgps-a8aff-default-rtdb.europe-west1.firebasedatabase.app",
-      projectId: "sharedgps-a8aff",
-      storageBucket: "sharedgps-a8aff.firebasestorage.app",
-      messagingSenderId: "429099604343",
-      appId: "1:429099604343:web:b49c590ccd4cf66ea96972"
-    };
-
-    const app = initializeApp(firebaseConfig);
-    const db = getDatabase(app);
-
-    let map, directionsService, rendererMe, rendererPartner;
-    let myMarker = null, partnerMarker = null, meetMarker = null;
-    let myPos = null, partnerPos = null;
-    let watchId = null, isSharing = false;
-    let USER_KEY = null, PARTNER_KEY = null;
-
-    const userConfig = {
-      user_a: { emoji: "👨", color: "#60a5fa", gColor: "#4285F4", label: "Lui" },
-      user_b: { emoji: "👩", color: "#4ade80", gColor: "#34A853", label: "Lei" }
-    };
-
-    // ── Selezione utente ──────────────────────────────────────────
-    function selectUser(key) {
-      USER_KEY = key;
-      PARTNER_KEY = key === "user_a" ? "user_b" : "user_a";
-      const cfg = userConfig[key];
-      const pCfg = userConfig[PARTNER_KEY];
-
-      document.getElementById("screen-select").style.display = "none";
-      document.getElementById("screen-map").style.display = "flex";
-      document.getElementById("my-label").textContent = cfg.emoji + " Tu (" + cfg.label + ")";
-      document.getElementById("partner-status").textContent = pCfg.emoji + " " + pCfg.label + " — in attesa...";
-
-      initMap();
-      listenPartner();
-    }
-
-    // ── Google Maps ───────────────────────────────────────────────
-    function initMap() {
-      map = new google.maps.Map(document.getElementById("map"), {
-        center: { lat: 45.4654, lng: 9.1859 },
-        zoom: 13,
-        disableDefaultUI: true,
-        zoomControl: true,
-        zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM },
-        styles: [
-          { elementType: "geometry", stylers: [{ color: "#1a1d27" }] },
-          { elementType: "labels.text.stroke", stylers: [{ color: "#1a1d27" }] },
-          { elementType: "labels.text.fill", stylers: [{ color: "#8891a8" }] },
-          { featureType: "road", elementType: "geometry", stylers: [{ color: "#2e3348" }] },
-          { featureType: "road", elementType: "geometry.stroke", stylers: [{ color: "#1a1d27" }] },
-          { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#3d4466" }] },
-          { featureType: "water", elementType: "geometry", stylers: [{ color: "#0f1117" }] },
-          { featureType: "poi", stylers: [{ visibility: "off" }] },
-          { featureType: "transit", stylers: [{ visibility: "off" }] },
-          { featureType: "landscape", elementType: "geometry", stylers: [{ color: "#161922" }] }
-        ]
-      });
-
-      directionsService = new google.maps.DirectionsService();
-
-      rendererMe = new google.maps.DirectionsRenderer({
-        map, suppressMarkers: true,
-        polylineOptions: { strokeColor: userConfig[USER_KEY].gColor, strokeWeight: 5, strokeOpacity: 0.85 }
-      });
-
-      rendererPartner = new google.maps.DirectionsRenderer({
-        map, suppressMarkers: true,
-        polylineOptions: { strokeColor: userConfig[PARTNER_KEY].gColor, strokeWeight: 5, strokeOpacity: 0.85 }
-      });
-    }
-
-    // ── GPS browser ───────────────────────────────────────────────
-    function onGpsSuccess(pos) {
-      const lat = pos.coords.latitude;
-      const lng = pos.coords.longitude;
-      myPos = { lat, lng };
-
-      set(ref(db, "session/" + USER_KEY), {
-        lat, lng, accuracy: pos.coords.accuracy, timestamp: Date.now()
-      });
-
-      showStatus("🟢 Posizione ricevuta", "ok");
-      const cfg = userConfig[USER_KEY];
-      if (!myMarker) {
-        myMarker = new google.maps.Marker({
-          position: myPos, map,
-          title: "Tu sei qui",
-          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: cfg.color, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 },
-          label: { text: cfg.emoji, fontSize: "16px" }
-        });
-        map.setCenter(myPos);
-        map.setZoom(16);
-      } else { myMarker.setPosition(myPos); }
-
-      updateMeetPoint();
-      fitBothMarkers();
-    }
-
-    function onGpsError(err, highAccuracy) {
-      if (err.code === 1) { // PERMISSION_DENIED
-        showStatus("❌ Permesso GPS negato — abilitalo nelle impostazioni", "error");
-        isSharing = false;
-        document.getElementById("btn-share").textContent = "📍 Condividi posizione";
-        document.getElementById("btn-share").classList.remove("active");
-      } else if (highAccuracy) {
-        // Timeout o errore con alta precisione → riprova con bassa precisione
-        showStatus("⏳ GPS lento, riprovo con precisione ridotta...", "warn");
-        if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-        setTimeout(() => {
-          if (!isSharing) return;
-          watchId = navigator.geolocation.watchPosition(
-            onGpsSuccess,
-            (e) => onGpsError(e, false),
-            { enableHighAccuracy: false, maximumAge: 15000, timeout: 60000 }
-          );
-        }, 500);
-      } else {
-        showStatus("❌ GPS non disponibile: " + err.message, "error");
-        isSharing = false;
-        document.getElementById("btn-share").textContent = "📍 Condividi posizione";
-        document.getElementById("btn-share").classList.remove("active");
-      }
-    }
-
-    function startSharing() {
-      if (!navigator.geolocation) { showStatus("❌ GPS non supportato", "error"); return; }
-
-      isSharing = true;
-      document.getElementById("btn-share").textContent = "⏹ Smetti di condividere";
-      document.getElementById("btn-share").classList.add("active");
-      showStatus("⏳ Ricerca GPS...", "warn");
-
-      watchId = navigator.geolocation.watchPosition(
-        onGpsSuccess,
-        (e) => onGpsError(e, true),
-        { enableHighAccuracy: true, maximumAge: 5000, timeout: 60000 }
-      );
-    }
-
-    function stopSharing() {
-      if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-      isSharing = false;
-      document.getElementById("btn-share").textContent = "📍 Condividi posizione";
-      document.getElementById("btn-share").classList.remove("active");
-      showStatus("⏸ Condivisione fermata", "warn");
-      set(ref(db, "session/" + USER_KEY), null);
-      if (myMarker) { myMarker.setMap(null); myMarker = null; }
-      myPos = null;
-      clearRouteAndMeet();
-    }
-
-    // ── Ascolta partner ───────────────────────────────────────────
-    function listenPartner() {
-      onValue(ref(db, "session/" + PARTNER_KEY), (snapshot) => {
-        const data = snapshot.val();
-        const pCfg = userConfig[PARTNER_KEY];
-
-        if (!data) {
-          document.getElementById("partner-status").textContent = pCfg.emoji + " " + pCfg.label + " non sta condividendo";
-          if (partnerMarker) { partnerMarker.setMap(null); partnerMarker = null; }
-          partnerPos = null;
-          clearRouteAndMeet();
-          return;
-        }
-
-        partnerPos = { lat: data.lat, lng: data.lng };
-        const ago = Math.round((Date.now() - data.timestamp) / 1000);
-        document.getElementById("partner-status").textContent =
-          pCfg.emoji + " " + pCfg.label + " — " + (ago < 10 ? "ora" : ago + "s fa");
-
-        if (!partnerMarker) {
-          partnerMarker = new google.maps.Marker({
-            position: partnerPos, map,
-            icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: pCfg.color, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 },
-            label: { text: pCfg.emoji, fontSize: "16px" }
-          });
-        } else { partnerMarker.setPosition(partnerPos); }
-
-        updateMeetPoint();
-        fitBothMarkers();
-        updateDistance();
-      });
-    }
-
-    // ── Meet point + Directions ───────────────────────────────────
-    function updateMeetPoint() {
-      if (!myPos || !partnerPos) return;
-      const midPos = { lat: (myPos.lat + partnerPos.lat) / 2, lng: (myPos.lng + partnerPos.lng) / 2 };
-
-      if (!meetMarker) {
-        meetMarker = new google.maps.Marker({
-          position: midPos, map,
-          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 12, fillColor: "#f59e0b", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 },
-          label: { text: "⭐", fontSize: "14px" }
-        });
-      } else { meetMarker.setPosition(midPos); }
-
-      calcRoute(myPos, midPos, rendererMe, "my-eta", userConfig[USER_KEY]);
-      calcRoute(partnerPos, midPos, rendererPartner, "partner-eta", userConfig[PARTNER_KEY]);
-    }
-
-    function calcRoute(origin, dest, renderer, etaId, cfg) {
-      directionsService.route({ origin, destination: dest, travelMode: google.maps.TravelMode.WALKING },
-        (result, status) => {
-          if (status === "OK") {
-            renderer.setDirections(result);
-            const leg = result.routes[0].legs[0];
-            document.getElementById(etaId).textContent = cfg.emoji + " " + leg.distance.text + " · ~" + leg.duration.text;
-          }
-        }
-      );
-    }
-
-    function clearRouteAndMeet() {
-      try { rendererMe.setDirections({ routes: [] }); } catch(e) {}
-      try { rendererPartner.setDirections({ routes: [] }); } catch(e) {}
-      if (meetMarker) { meetMarker.setMap(null); meetMarker = null; }
-      document.getElementById("my-eta").textContent = "";
-      document.getElementById("partner-eta").textContent = "";
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────
-    function fitBothMarkers() {
-      const positions = [myPos, partnerPos].filter(Boolean);
-      if (positions.length === 2) {
-        const bounds = new google.maps.LatLngBounds();
-        positions.forEach(p => bounds.extend(p));
-        map.fitBounds(bounds, 80);
-      }
-      // Se c'è solo una posizione non cambiamo zoom (già centrato al primo fix)
-    }
-
-    function updateDistance() {
-      if (!myPos || !partnerPos) return;
-      const R = 6371000;
-      const dLat = (partnerPos.lat - myPos.lat) * Math.PI / 180;
-      const dLng = (partnerPos.lng - myPos.lng) * Math.PI / 180;
-      const a = Math.sin(dLat/2)**2 + Math.cos(myPos.lat*Math.PI/180) * Math.cos(partnerPos.lat*Math.PI/180) * Math.sin(dLng/2)**2;
-      const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      document.getElementById("distance").textContent = "📏 " + (dist < 1000 ? Math.round(dist) + " m" : (dist/1000).toFixed(1) + " km");
-    }
-
-    function showStatus(msg, type) {
-      const el = document.getElementById("my-status");
-      el.textContent = msg;
-      el.className = "status-badge " + (type || "ok");
-    }
-
-    // ── Boot ──────────────────────────────────────────────────────
-    window.initGoogleMaps = function() {
-      document.getElementById("btn-user-a").addEventListener("click", () => selectUser("user_a"));
-      document.getElementById("btn-user-b").addEventListener("click", () => selectUser("user_b"));
-      document.getElementById("btn-share").addEventListener("click", () => {
-        if (isSharing) stopSharing(); else startSharing();
-      });
-      document.getElementById("btn-fit").addEventListener("click", fitBothMarkers);
-    };
-  </script>
-
-  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDFo78cFxqaYcrrL6Gw-Gqm1yL8aGbtcvI&callback=initGoogleMaps&libraries=places" async defer></script>
-
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@500&display=swap');
-    * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
+    * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
     :root {
       --bg:#0f1117; --surface:#1a1d27; --surface2:#22263a; --border:#2e3348;
       --green:#4ade80; --blue:#60a5fa; --amber:#f59e0b; --red:#f87171;
       --text:#e8eaf0; --muted:#8891a8;
     }
-    html, body { height:100%; font-family:'DM Sans',sans-serif; background:var(--bg); color:var(--text); overflow:hidden; }
+    html, body { height:100%; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:var(--bg); color:var(--text); overflow:hidden; }
 
-    /* Schermata selezione */
+    /* === SELEZIONE === */
     #screen-select {
       height:100dvh; display:flex; flex-direction:column;
-      align-items:center; justify-content:center; gap:28px; padding:32px;
+      align-items:center; justify-content:center; gap:32px; padding:32px;
     }
-    .select-logo { font-family:'DM Mono',monospace; font-size:26px; color:var(--green); letter-spacing:-1px; }
-    .select-logo span { color:var(--muted); }
-    .select-sub { font-size:15px; color:var(--muted); text-align:center; line-height:1.5; }
-    .select-btns { display:flex; gap:16px; width:100%; max-width:320px; }
+    .logo { font-size:22px; font-weight:700; letter-spacing:-0.5px; color:var(--green); }
+    .logo span { color:var(--muted); font-weight:400; }
+    .subtitle { font-size:14px; color:var(--muted); text-align:center; line-height:1.6; }
+    .btns-select { display:flex; gap:16px; width:100%; max-width:300px; }
     .btn-user {
-      flex:1; padding:32px 12px; border:2px solid var(--border); border-radius:20px;
-      background:var(--surface); color:var(--text); font-family:'DM Sans',sans-serif;
-      font-size:16px; font-weight:600; cursor:pointer;
-      display:flex; flex-direction:column; align-items:center; gap:12px; transition:all .2s;
+      flex:1; padding:28px 12px; border:2px solid var(--border);
+      border-radius:20px; background:var(--surface); color:var(--text);
+      font-size:15px; font-weight:600; cursor:pointer;
+      display:flex; flex-direction:column; align-items:center; gap:10px;
+      transition:border-color .2s, background .2s;
     }
-    .btn-user .em { font-size:48px; }
-    #btn-user-a:active { border-color:var(--blue); background:rgba(96,165,250,.1); }
-    #btn-user-b:active { border-color:var(--green); background:rgba(74,222,128,.1); }
+    .btn-user .em { font-size:44px; line-height:1; }
+    .btn-user:active { background:var(--surface2); }
 
-    /* Schermata mappa */
+    /* === MAPPA === */
     #screen-map { display:none; flex-direction:column; height:100dvh; }
-    header { background:var(--surface); border-bottom:1px solid var(--border); padding:10px 14px; display:flex; align-items:center; gap:10px; }
-    .logo { font-family:'DM Mono',monospace; font-size:14px; color:var(--green); }
-    .logo span { color:var(--muted); }
-    #my-label { font-size:12px; color:var(--muted); background:var(--surface2); padding:3px 8px; border-radius:12px; }
-    #map { flex:1; }
-    #panel { background:var(--surface); border-top:1px solid var(--border); padding:12px 14px; display:flex; flex-direction:column; gap:8px; }
-    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .status-badge { font-size:11px; padding:4px 10px; border-radius:20px; font-weight:500; background:var(--surface2); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
-    .status-badge.ok { background:rgba(74,222,128,.12); color:var(--green); }
-    .status-badge.error { background:rgba(248,113,113,.12); color:var(--red); }
-    .status-badge.warn { background:rgba(245,158,11,.12); color:var(--amber); }
-    #partner-status { font-size:11px; color:var(--muted); padding:4px 10px; border-radius:20px; background:var(--surface2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
-    #distance { font-size:11px; color:var(--muted); font-family:'DM Mono',monospace; margin-left:auto; }
-    .eta-row { display:flex; gap:8px; flex-wrap:wrap; }
-    .eta-row span { font-size:11px; font-family:'DM Mono',monospace; color:var(--muted); background:var(--surface2); padding:4px 10px; border-radius:8px; }
+    header {
+      background:var(--surface); border-bottom:1px solid var(--border);
+      padding:10px 14px; display:flex; align-items:center; gap:8px; flex-shrink:0;
+    }
+    .hlogo { font-size:14px; font-weight:700; color:var(--green); }
+    .hlogo span { color:var(--muted); font-weight:400; }
+    .badge {
+      font-size:11px; padding:3px 9px; border-radius:20px;
+      background:var(--surface2); color:var(--muted); font-weight:500;
+    }
+    .spacer { flex:1; }
+    #dist-badge { font-size:11px; font-family:monospace; color:var(--muted); }
+    #map { flex:1; min-height:0; }
+    #panel {
+      background:var(--surface); border-top:1px solid var(--border);
+      padding:12px 14px; display:flex; flex-direction:column; gap:8px; flex-shrink:0;
+    }
+    .status-row { display:flex; gap:8px; align-items:center; min-height:26px; }
+    #my-status {
+      font-size:11px; padding:4px 10px; border-radius:20px; font-weight:500;
+      background:var(--surface2); color:var(--muted);
+      max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    #my-status.ok    { background:rgba(74,222,128,.15); color:var(--green); }
+    #my-status.warn  { background:rgba(245,158,11,.15); color:var(--amber); }
+    #my-status.error { background:rgba(248,113,113,.15); color:var(--red); }
+    #partner-status {
+      font-size:11px; padding:4px 10px; border-radius:20px;
+      background:var(--surface2); color:var(--muted);
+      max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    #partner-status.active { background:rgba(96,165,250,.15); color:var(--blue); }
+    .eta-row { display:flex; gap:8px; min-height:20px; }
+    .eta-row span {
+      font-size:11px; font-family:monospace; padding:3px 9px;
+      border-radius:8px; background:var(--surface2); color:var(--muted);
+    }
     .btn-row { display:flex; gap:8px; }
-    #btn-share { flex:1; padding:13px; border:none; border-radius:12px; font-family:'DM Sans',sans-serif; font-size:14px; font-weight:600; cursor:pointer; transition:all .15s; background:var(--green); color:#0a1a10; }
-    #btn-share.active { background:var(--red); color:#1a0a0a; }
+    #btn-share {
+      flex:1; padding:14px; border:none; border-radius:14px;
+      font-size:14px; font-weight:700; cursor:pointer;
+      background:var(--green); color:#071a0e; transition:transform .1s, background .2s;
+    }
+    #btn-share.stop { background:var(--red); color:#1a0707; }
     #btn-share:active { transform:scale(.97); }
-    #btn-fit { width:46px; border:1px solid var(--border); border-radius:12px; font-size:18px; cursor:pointer; background:var(--surface2); color:var(--text); }
+    #btn-fit {
+      width:48px; border:1px solid var(--border); border-radius:14px;
+      font-size:20px; cursor:pointer; background:var(--surface2); color:var(--text);
+    }
     #btn-fit:active { transform:scale(.97); }
   </style>
 </head>
 <body>
 
-  <!-- Schermata 1: selezione -->
-  <div id="screen-select">
-    <div class="select-logo">shared<span>gps</span></div>
-    <div class="select-sub">Apri questo link su entrambi i telefoni<br>e scegli chi sei</div>
-    <div class="select-btns">
-      <button class="btn-user" id="btn-user-a"><span class="em">👨</span>Lui</button>
-      <button class="btn-user" id="btn-user-b"><span class="em">👩</span>Lei</button>
-    </div>
+<!-- SCHERMATA SELEZIONE -->
+<div id="screen-select">
+  <div class="logo">shared<span>gps</span></div>
+  <div class="subtitle">Aprite questo link su entrambi i telefoni<br>e scegliete chi siete</div>
+  <div class="btns-select">
+    <button class="btn-user" id="btn-a"><span class="em">👨</span>Lui</button>
+    <button class="btn-user" id="btn-b"><span class="em">👩</span>Lei</button>
   </div>
+</div>
 
-  <!-- Schermata 2: mappa -->
-  <div id="screen-map">
-    <header>
-      <div class="logo">shared<span>gps</span></div>
-      <div id="my-label"></div>
-      <div style="flex:1"></div>
-      <div id="distance"></div>
-    </header>
-    <div id="map"></div>
-    <div id="panel">
-      <div class="row">
-        <span id="my-status" class="status-badge">⏳ Premi per condividere</span>
-        <span id="partner-status">📵 In attesa...</span>
-      </div>
-      <div class="eta-row">
-        <span id="my-eta"></span>
-        <span id="partner-eta"></span>
-      </div>
-      <div class="btn-row">
-        <button id="btn-share">📍 Condividi posizione</button>
-        <button id="btn-fit">⊹</button>
-      </div>
+<!-- SCHERMATA MAPPA -->
+<div id="screen-map">
+  <header>
+    <div class="hlogo">shared<span>gps</span></div>
+    <div class="badge" id="my-label"></div>
+    <div class="spacer"></div>
+    <div id="dist-badge"></div>
+  </header>
+  <div id="map"></div>
+  <div id="panel">
+    <div class="status-row">
+      <div id="my-status">⏳ Premi per condividere</div>
+      <div id="partner-status">📵 Partner offline</div>
+    </div>
+    <div class="eta-row">
+      <span id="eta-me"></span>
+      <span id="eta-partner"></span>
+    </div>
+    <div class="btn-row">
+      <button id="btn-share">📍 Condividi posizione</button>
+      <button id="btn-fit">⊹</button>
     </div>
   </div>
+</div>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp }              from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+  const app = initializeApp({
+    apiKey:            "AIzaSyAYj6IvX_RSvN6ae760cLuvHB4vTekHPzA",
+    authDomain:        "sharedgps-a8aff.firebaseapp.com",
+    databaseURL:       "https://sharedgps-a8aff-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId:         "sharedgps-a8aff",
+    storageBucket:     "sharedgps-a8aff.firebasestorage.app",
+    messagingSenderId: "429099604343",
+    appId:             "1:429099604343:web:b49c590ccd4cf66ea96972"
+  });
+  const db = getDatabase(app);
+
+  // ── Stato ────────────────────────────────────────────────────
+  const CFG = {
+    user_a: { emoji:"👨", color:"#60a5fa", gColor:"#4285F4", label:"Lui" },
+    user_b: { emoji:"👩", color:"#4ade80", gColor:"#34A853", label:"Lei" }
+  };
+
+  let ME = null, PARTNER = null;
+  let map, dirSvc, rendMe, rendPartner;
+  let markerMe = null, markerPartner = null, markerMeet = null;
+  let posMe = null, posPartner = null;
+  let watchId = null, sharing = false;
+
+  // ── Selezione ────────────────────────────────────────────────
+  document.getElementById("btn-a").onclick = () => start("user_a");
+  document.getElementById("btn-b").onclick = () => start("user_b");
+
+  function start(key) {
+    ME = key;
+    PARTNER = key === "user_a" ? "user_b" : "user_a";
+    document.getElementById("screen-select").style.display = "none";
+    document.getElementById("screen-map").style.display = "flex";
+    document.getElementById("my-label").textContent = CFG[ME].emoji + " Tu (" + CFG[ME].label + ")";
+    waitForMaps();
+  }
+
+  // ── Aspetta Google Maps ──────────────────────────────────────
+  function waitForMaps() {
+    if (window._mapsReady) initMap();
+    else window._onMapsReady = initMap;
+  }
+
+  window._mapsCallback = function() {
+    window._mapsReady = true;
+    if (window._onMapsReady) window._onMapsReady();
+  };
+
+  // ── Init Mappa ───────────────────────────────────────────────
+  function initMap() {
+    map = new google.maps.Map(document.getElementById("map"), {
+      center: { lat: 45.649, lng: 13.776 }, // Trieste
+      zoom: 13,
+      disableDefaultUI: true,
+      zoomControl: true,
+      zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM },
+      styles: [
+        { elementType:"geometry",            stylers:[{ color:"#1a1d27" }] },
+        { elementType:"labels.text.stroke",  stylers:[{ color:"#1a1d27" }] },
+        { elementType:"labels.text.fill",    stylers:[{ color:"#8891a8" }] },
+        { featureType:"road", elementType:"geometry",        stylers:[{ color:"#2e3348" }] },
+        { featureType:"road", elementType:"geometry.stroke", stylers:[{ color:"#1a1d27" }] },
+        { featureType:"road.highway", elementType:"geometry",stylers:[{ color:"#3d4466" }] },
+        { featureType:"water",  elementType:"geometry",      stylers:[{ color:"#0f1117" }] },
+        { featureType:"poi",    stylers:[{ visibility:"off" }] },
+        { featureType:"transit",stylers:[{ visibility:"off" }] },
+        { featureType:"landscape", elementType:"geometry",   stylers:[{ color:"#161922" }] }
+      ]
+    });
+
+    dirSvc = new google.maps.DirectionsService();
+    rendMe      = new google.maps.DirectionsRenderer({ map, suppressMarkers:true, polylineOptions:{ strokeColor: CFG[ME].gColor,      strokeWeight:5, strokeOpacity:.8 } });
+    rendPartner = new google.maps.DirectionsRenderer({ map, suppressMarkers:true, polylineOptions:{ strokeColor: CFG[PARTNER].gColor, strokeWeight:5, strokeOpacity:.8 } });
+
+    document.getElementById("btn-share").onclick = toggleShare;
+    document.getElementById("btn-fit").onclick   = fitMap;
+
+    listenPartner();
+  }
+
+  // ── GPS ──────────────────────────────────────────────────────
+  function toggleShare() {
+    sharing ? stopShare() : doShare();
+  }
+
+  function doShare() {
+    if (!navigator.geolocation) { setStatus("❌ GPS non supportato", "error"); return; }
+    sharing = true;
+    document.getElementById("btn-share").textContent = "⏹ Smetti";
+    document.getElementById("btn-share").classList.add("stop");
+    setStatus("⏳ Ricerca GPS...", "warn");
+
+    function tryWatch(highAcc, attempt) {
+      watchId = navigator.geolocation.watchPosition(
+        onPos,
+        (err) => {
+          if (err.code === 1) { // permesso negato
+            setStatus("❌ Abilita GPS nelle impostazioni", "error");
+            stopShare(); return;
+          }
+          if (highAcc && attempt < 2) {
+            // Riprova con bassa precisione (rete/WiFi)
+            setStatus("⏳ Riprovo con GPS rete...", "warn");
+            navigator.geolocation.clearWatch(watchId);
+            setTimeout(() => tryWatch(false, attempt + 1), 800);
+          } else {
+            setStatus("❌ GPS non disponibile", "error");
+            stopShare();
+          }
+        },
+        { enableHighAccuracy: highAcc, maximumAge: 5000, timeout: highAcc ? 15000 : 30000 }
+      );
+    }
+
+    tryWatch(true, 0);
+  }
+
+  function onPos(pos) {
+    const lat = pos.coords.latitude;
+    const lng = pos.coords.longitude;
+    posMe = { lat, lng };
+
+    set(ref(db, "session/" + ME), { lat, lng, ts: Date.now() });
+    setStatus("🟢 Posizione attiva", "ok");
+
+    placeMarker("me", posMe, CFG[ME]);
+    updateAll();
+  }
+
+  function stopShare() {
+    sharing = false;
+    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+    document.getElementById("btn-share").textContent = "📍 Condividi posizione";
+    document.getElementById("btn-share").classList.remove("stop");
+    set(ref(db, "session/" + ME), null);
+    removeMarker("me");
+    posMe = null;
+    clearRoutes();
+    if (!sharing) setStatus("⏸ Condivisione fermata", "warn");
+  }
+
+  // ── Firebase: ascolta partner ────────────────────────────────
+  function listenPartner() {
+    onValue(ref(db, "session/" + PARTNER), (snap) => {
+      const data = snap.val();
+      const pCfg = CFG[PARTNER];
+
+      if (!data) {
+        document.getElementById("partner-status").textContent = pCfg.emoji + " " + pCfg.label + " offline";
+        document.getElementById("partner-status").className = "";
+        removeMarker("partner");
+        posPartner = null;
+        clearRoutes();
+        document.getElementById("dist-badge").textContent = "";
+        return;
+      }
+
+      posPartner = { lat: data.lat, lng: data.lng };
+      const ago = Math.round((Date.now() - data.ts) / 1000);
+      const agoStr = ago < 5 ? "ora" : ago + "s fa";
+      document.getElementById("partner-status").textContent = pCfg.emoji + " " + pCfg.label + " · " + agoStr;
+      document.getElementById("partner-status").className = "active";
+
+      placeMarker("partner", posPartner, pCfg);
+      updateAll();
+    });
+  }
+
+  // ── Marker ───────────────────────────────────────────────────
+  function placeMarker(who, pos, cfg) {
+    if (who === "me") {
+      if (!markerMe) {
+        markerMe = new google.maps.Marker({
+          position: pos, map,
+          icon: { path: google.maps.SymbolPath.CIRCLE, scale:14, fillColor:cfg.color, fillOpacity:1, strokeColor:"#fff", strokeWeight:3 },
+          label: { text: cfg.emoji, fontSize:"15px" }
+        });
+        // Prima volta: centra su di te
+        map.setCenter(pos); map.setZoom(16);
+      } else { markerMe.setPosition(pos); }
+    } else {
+      if (!markerPartner) {
+        markerPartner = new google.maps.Marker({
+          position: pos, map,
+          icon: { path: google.maps.SymbolPath.CIRCLE, scale:14, fillColor:cfg.color, fillOpacity:1, strokeColor:"#fff", strokeWeight:3 },
+          label: { text: cfg.emoji, fontSize:"15px" }
+        });
+      } else { markerPartner.setPosition(pos); }
+    }
+  }
+
+  function removeMarker(who) {
+    if (who === "me"      && markerMe)      { markerMe.setMap(null);      markerMe = null; }
+    if (who === "partner" && markerPartner) { markerPartner.setMap(null); markerPartner = null; }
+    if (markerMeet) { markerMeet.setMap(null); markerMeet = null; }
+  }
+
+  // ── Aggiorna tutto ───────────────────────────────────────────
+  function updateAll() {
+    if (!posMe || !posPartner) return;
+
+    fitMap();
+    updateDistance();
+
+    const mid = {
+      lat: (posMe.lat + posPartner.lat) / 2,
+      lng: (posMe.lng + posPartner.lng) / 2
+    };
+
+    if (!markerMeet) {
+      markerMeet = new google.maps.Marker({
+        position: mid, map,
+        icon: { path: google.maps.SymbolPath.CIRCLE, scale:11, fillColor:"#f59e0b", fillOpacity:1, strokeColor:"#fff", strokeWeight:2 },
+        label: { text:"⭐", fontSize:"13px" }
+      });
+    } else { markerMeet.setPosition(mid); }
+
+    calcRoute(posMe,      mid, rendMe,      "eta-me",      CFG[ME]);
+    calcRoute(posPartner, mid, rendPartner, "eta-partner", CFG[PARTNER]);
+  }
+
+  function calcRoute(from, to, renderer, etaId, cfg) {
+    dirSvc.route(
+      { origin: from, destination: to, travelMode: google.maps.TravelMode.WALKING },
+      (res, status) => {
+        if (status === "OK") {
+          renderer.setDirections(res);
+          const leg = res.routes[0].legs[0];
+          document.getElementById(etaId).textContent = cfg.emoji + " " + leg.distance.text + " · " + leg.duration.text;
+        }
+      }
+    );
+  }
+
+  function clearRoutes() {
+    try { rendMe.setDirections({ routes:[] }); }      catch(e) {}
+    try { rendPartner.setDirections({ routes:[] }); } catch(e) {}
+    if (markerMeet) { markerMeet.setMap(null); markerMeet = null; }
+    document.getElementById("eta-me").textContent = "";
+    document.getElementById("eta-partner").textContent = "";
+  }
+
+  function fitMap() {
+    const pts = [posMe, posPartner].filter(Boolean);
+    if (pts.length === 2) {
+      const b = new google.maps.LatLngBounds();
+      pts.forEach(p => b.extend(p));
+      map.fitBounds(b, 80);
+    } else if (pts.length === 1) {
+      map.setCenter(pts[0]); map.setZoom(16);
+    }
+  }
+
+  function updateDistance() {
+    if (!posMe || !posPartner) return;
+    const R = 6371000;
+    const dLat = (posPartner.lat - posMe.lat) * Math.PI / 180;
+    const dLng = (posPartner.lng - posMe.lng) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2 + Math.cos(posMe.lat*Math.PI/180) * Math.cos(posPartner.lat*Math.PI/180) * Math.sin(dLng/2)**2;
+    const d = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    document.getElementById("dist-badge").textContent = d < 1000 ? Math.round(d) + " m" : (d/1000).toFixed(1) + " km";
+  }
+
+  function setStatus(msg, cls) {
+    const el = document.getElementById("my-status");
+    el.textContent = msg;
+    el.className = cls || "";
+  }
+</script>
+
+<!-- Google Maps -->
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDFo78cFxqaYcrrL6Gw-Gqm1yL8aGbtcvI&callback=_mapsCallback&libraries=places" async defer></script>
 
 </body>
 </html>
