@@ -86,43 +86,70 @@
     }
 
     // ── GPS browser ───────────────────────────────────────────────
+    function onGpsSuccess(pos) {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      myPos = { lat, lng };
+
+      set(ref(db, "session/" + USER_KEY), {
+        lat, lng, accuracy: pos.coords.accuracy, timestamp: Date.now()
+      });
+
+      showStatus("🟢 Posizione ricevuta", "ok");
+      const cfg = userConfig[USER_KEY];
+      if (!myMarker) {
+        myMarker = new google.maps.Marker({
+          position: myPos, map,
+          title: "Tu sei qui",
+          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: cfg.color, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 },
+          label: { text: cfg.emoji, fontSize: "16px" }
+        });
+        map.setCenter(myPos);
+        map.setZoom(16);
+      } else { myMarker.setPosition(myPos); }
+
+      updateMeetPoint();
+      fitBothMarkers();
+    }
+
+    function onGpsError(err, highAccuracy) {
+      if (err.code === 1) { // PERMISSION_DENIED
+        showStatus("❌ Permesso GPS negato — abilitalo nelle impostazioni", "error");
+        isSharing = false;
+        document.getElementById("btn-share").textContent = "📍 Condividi posizione";
+        document.getElementById("btn-share").classList.remove("active");
+      } else if (highAccuracy) {
+        // Timeout o errore con alta precisione → riprova con bassa precisione
+        showStatus("⏳ GPS lento, riprovo con precisione ridotta...", "warn");
+        if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+        setTimeout(() => {
+          if (!isSharing) return;
+          watchId = navigator.geolocation.watchPosition(
+            onGpsSuccess,
+            (e) => onGpsError(e, false),
+            { enableHighAccuracy: false, maximumAge: 15000, timeout: 60000 }
+          );
+        }, 500);
+      } else {
+        showStatus("❌ GPS non disponibile: " + err.message, "error");
+        isSharing = false;
+        document.getElementById("btn-share").textContent = "📍 Condividi posizione";
+        document.getElementById("btn-share").classList.remove("active");
+      }
+    }
+
     function startSharing() {
       if (!navigator.geolocation) { showStatus("❌ GPS non supportato", "error"); return; }
 
       isSharing = true;
       document.getElementById("btn-share").textContent = "⏹ Smetti di condividere";
       document.getElementById("btn-share").classList.add("active");
-      showStatus("🟢 Condivisione attiva", "ok");
+      showStatus("⏳ Ricerca GPS...", "warn");
 
       watchId = navigator.geolocation.watchPosition(
-        (pos) => {
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          myPos = { lat, lng };
-
-          set(ref(db, "session/" + USER_KEY), {
-            lat, lng, accuracy: pos.coords.accuracy, timestamp: Date.now()
-          });
-
-          const cfg = userConfig[USER_KEY];
-          if (!myMarker) {
-            myMarker = new google.maps.Marker({
-              position: myPos, map,
-              icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: cfg.color, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 },
-              label: { text: cfg.emoji, fontSize: "16px" }
-            });
-          } else { myMarker.setPosition(myPos); }
-
-          updateMeetPoint();
-          fitBothMarkers();
-        },
-        (err) => {
-          showStatus("❌ Errore GPS: " + err.message, "error");
-          isSharing = false;
-          document.getElementById("btn-share").textContent = "📍 Condividi posizione";
-          document.getElementById("btn-share").classList.remove("active");
-        },
-        { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
+        onGpsSuccess,
+        (e) => onGpsError(e, true),
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 60000 }
       );
     }
 
@@ -215,10 +242,8 @@
         const bounds = new google.maps.LatLngBounds();
         positions.forEach(p => bounds.extend(p));
         map.fitBounds(bounds, 80);
-      } else if (positions.length === 1) {
-        map.setCenter(positions[0]);
-        map.setZoom(16);
       }
+      // Se c'è solo una posizione non cambiamo zoom (già centrato al primo fix)
     }
 
     function updateDistance() {
