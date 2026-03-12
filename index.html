@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SharedGPS</title>
 
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { getDatabase, ref, onValue, set }
@@ -26,56 +23,72 @@
     const app = initializeApp(firebaseConfig);
     const db = getDatabase(app);
 
-    let map, myMarker, partnerMarker, meetMarker, routeLayer;
+    let map, directionsService, directionsRendererMe, directionsRendererPartner;
+    let myMarker = null, partnerMarker = null, meetMarker = null;
     let myPos = null, partnerPos = null;
-    let watchId = null;
-    let isSharing = false;
-    let USER_KEY = null;
-    let PARTNER_KEY = null;
+    let watchId = null, isSharing = false;
+    let USER_KEY = null, PARTNER_KEY = null;
 
     const userConfig = {
-      user_a: { emoji: "👨", color: "#60a5fa", shadow: "rgba(96,165,250,.6)", label: "Lui" },
-      user_b: { emoji: "👩", color: "#4ade80", shadow: "rgba(74,222,128,.6)", label: "Lei" }
+      user_a: { emoji: "👨", color: "#60a5fa", label: "Lui", gColor: "#4285F4" },
+      user_b: { emoji: "👩", color: "#4ade80", label: "Lei", gColor: "#34A853" }
     };
 
-    function makeIcon(key) {
-      const c = userConfig[key];
-      return L.divIcon({
-        className: "",
-        html: `<div style="width:36px;height:36px;border-radius:50%;background:${c.color};border:3px solid #fff;box-shadow:0 2px 12px ${c.shadow};display:flex;align-items:center;justify-content:center;font-size:18px;">${c.emoji}</div>`,
-        iconSize: [36, 36], iconAnchor: [18, 18]
-      });
-    }
-
-    const iconMeet = L.divIcon({
-      className: "",
-      html: `<div style="width:32px;height:32px;border-radius:50%;background:#f59e0b;border:3px solid #fff;box-shadow:0 2px 12px rgba(245,158,11,.6);display:flex;align-items:center;justify-content:center;font-size:16px;">⭐</div>`,
-      iconSize: [32, 32], iconAnchor: [16, 16]
-    });
-
+    // ── Selezione utente ──────────────────────────────────────────
     function selectUser(key) {
       USER_KEY = key;
       PARTNER_KEY = key === "user_a" ? "user_b" : "user_a";
       const cfg = userConfig[key];
-      const partnerCfg = userConfig[PARTNER_KEY];
+      const pCfg = userConfig[PARTNER_KEY];
 
       document.getElementById("screen-select").style.display = "none";
       document.getElementById("screen-map").style.display = "flex";
       document.getElementById("my-label").textContent = cfg.emoji + " Tu (" + cfg.label + ")";
-      document.getElementById("partner-label").textContent = partnerCfg.emoji + " " + partnerCfg.label;
+      document.getElementById("partner-status").textContent = pCfg.emoji + " " + pCfg.label + " — in attesa...";
 
       initMap();
       listenPartner();
     }
 
+    // ── Init Google Maps ──────────────────────────────────────────
     function initMap() {
-      map = L.map("map", { zoomControl: false }).setView([45.4654, 9.1859], 13);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "© OpenStreetMap", maxZoom: 19
-      }).addTo(map);
-      L.control.zoom({ position: "bottomright" }).addTo(map);
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: 45.4654, lng: 9.1859 },
+        zoom: 13,
+        disableDefaultUI: true,
+        zoomControl: true,
+        zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM },
+        styles: [
+          { elementType: "geometry", stylers: [{ color: "#1a1d27" }] },
+          { elementType: "labels.text.stroke", stylers: [{ color: "#1a1d27" }] },
+          { elementType: "labels.text.fill", stylers: [{ color: "#8891a8" }] },
+          { featureType: "road", elementType: "geometry", stylers: [{ color: "#2e3348" }] },
+          { featureType: "road", elementType: "geometry.stroke", stylers: [{ color: "#1a1d27" }] },
+          { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#3d4466" }] },
+          { featureType: "water", elementType: "geometry", stylers: [{ color: "#0f1117" }] },
+          { featureType: "poi", stylers: [{ visibility: "off" }] },
+          { featureType: "transit", stylers: [{ visibility: "off" }] },
+          { featureType: "administrative", elementType: "geometry", stylers: [{ color: "#2e3348" }] },
+          { featureType: "landscape", elementType: "geometry", stylers: [{ color: "#161922" }] }
+        ]
+      });
+
+      directionsService = new google.maps.DirectionsService();
+
+      directionsRendererMe = new google.maps.DirectionsRenderer({
+        map,
+        suppressMarkers: true,
+        polylineOptions: { strokeColor: userConfig[USER_KEY]?.gColor || "#4285F4", strokeWeight: 5, strokeOpacity: 0.85 }
+      });
+
+      directionsRendererPartner = new google.maps.DirectionsRenderer({
+        map,
+        suppressMarkers: true,
+        polylineOptions: { strokeColor: userConfig[PARTNER_KEY]?.gColor || "#34A853", strokeWeight: 5, strokeOpacity: 0.85 }
+      });
     }
 
+    // ── Geolocalizzazione ─────────────────────────────────────────
     function startSharing() {
       if (!navigator.geolocation) { showStatus("❌ GPS non supportato", "error"); return; }
       isSharing = true;
@@ -88,10 +101,30 @@
           const lat = pos.coords.latitude;
           const lng = pos.coords.longitude;
           myPos = { lat, lng };
-          set(ref(db, "session/" + USER_KEY), { lat, lng, accuracy: pos.coords.accuracy, timestamp: Date.now() });
+
+          set(ref(db, "session/" + USER_KEY), {
+            lat, lng, accuracy: pos.coords.accuracy, timestamp: Date.now()
+          });
+
+          const cfg = userConfig[USER_KEY];
           if (!myMarker) {
-            myMarker = L.marker([lat, lng], { icon: makeIcon(USER_KEY) }).addTo(map).bindPopup("📍 Sei qui");
-          } else { myMarker.setLatLng([lat, lng]); }
+            myMarker = new google.maps.Marker({
+              position: { lat, lng }, map,
+              title: "📍 Sei qui",
+              icon: {
+                path: google.maps.SymbolPath.CIRCLE,
+                scale: 14,
+                fillColor: cfg.color,
+                fillOpacity: 1,
+                strokeColor: "#ffffff",
+                strokeWeight: 3
+              },
+              label: { text: cfg.emoji, fontSize: "16px" }
+            });
+          } else {
+            myMarker.setPosition({ lat, lng });
+          }
+
           updateMeetPoint();
           fitBothMarkers();
         },
@@ -109,79 +142,113 @@
       set(ref(db, "session/" + USER_KEY), null);
     }
 
+    // ── Ascolta partner ───────────────────────────────────────────
     function listenPartner() {
       onValue(ref(db, "session/" + PARTNER_KEY), (snapshot) => {
         const data = snapshot.val();
-        const partnerCfg = userConfig[PARTNER_KEY];
+        const pCfg = userConfig[PARTNER_KEY];
+
         if (!data) {
-          document.getElementById("partner-status").textContent = partnerCfg.emoji + " " + partnerCfg.label + " non condivide";
-          if (partnerMarker) { map.removeLayer(partnerMarker); partnerMarker = null; }
+          document.getElementById("partner-status").textContent =
+            pCfg.emoji + " " + pCfg.label + " non sta condividendo";
+          if (partnerMarker) { partnerMarker.setMap(null); partnerMarker = null; }
+          if (meetMarker) { meetMarker.setMap(null); meetMarker = null; }
+          directionsRendererMe.setDirections({ routes: [] });
+          directionsRendererPartner.setDirections({ routes: [] });
           partnerPos = null;
-          clearRoute();
+          clearETA();
           return;
         }
+
         partnerPos = { lat: data.lat, lng: data.lng };
         const ago = Math.round((Date.now() - data.timestamp) / 1000);
         document.getElementById("partner-status").textContent =
-          partnerCfg.emoji + " " + partnerCfg.label + " — " + (ago < 10 ? "ora" : ago + "s fa");
+          pCfg.emoji + " " + pCfg.label + " — " + (ago < 10 ? "ora" : ago + "s fa");
+
         if (!partnerMarker) {
-          partnerMarker = L.marker([data.lat, data.lng], { icon: makeIcon(PARTNER_KEY) })
-            .addTo(map).bindPopup("📍 " + partnerCfg.label + " è qui");
-        } else { partnerMarker.setLatLng([data.lat, data.lng]); }
+          partnerMarker = new google.maps.Marker({
+            position: { lat: data.lat, lng: data.lng }, map,
+            title: pCfg.label + " è qui",
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 14,
+              fillColor: pCfg.color,
+              fillOpacity: 1,
+              strokeColor: "#ffffff",
+              strokeWeight: 3
+            },
+            label: { text: pCfg.emoji, fontSize: "16px" }
+          });
+        } else {
+          partnerMarker.setPosition({ lat: data.lat, lng: data.lng });
+        }
+
         updateMeetPoint();
         fitBothMarkers();
         updateDistance();
       });
     }
 
+    // ── Punto di incontro + Directions ────────────────────────────
     function updateMeetPoint() {
       if (!myPos || !partnerPos) return;
       const midLat = (myPos.lat + partnerPos.lat) / 2;
       const midLng = (myPos.lng + partnerPos.lng) / 2;
+      const midPos = { lat: midLat, lng: midLng };
+
       if (!meetMarker) {
-        meetMarker = L.marker([midLat, midLng], { icon: iconMeet }).addTo(map).bindPopup("⭐ Punto di incontro");
-      } else { meetMarker.setLatLng([midLat, midLng]); }
-      fetchRoute(myPos, partnerPos, midLat, midLng);
-    }
-
-    async function fetchRoute(me, partner, midLat, midLng) {
-      try {
-        const myCfg = userConfig[USER_KEY];
-        const partnerCfg = userConfig[PARTNER_KEY];
-        const urlMe = "https://router.project-osrm.org/route/v1/foot/" + me.lng + "," + me.lat + ";" + midLng + "," + midLat + "?overview=full&geometries=geojson";
-        const urlPartner = "https://router.project-osrm.org/route/v1/foot/" + partner.lng + "," + partner.lat + ";" + midLng + "," + midLat + "?overview=full&geometries=geojson";
-        const [resMe, resPartner] = await Promise.all([fetch(urlMe), fetch(urlPartner)]);
-        const [dataMe, dataPartner] = await Promise.all([resMe.json(), resPartner.json()]);
-        clearRoute();
-        if (dataMe.routes?.[0]) {
-          L.geoJSON(dataMe.routes[0].geometry, { style: { color: myCfg.color, weight: 4, opacity: 0.8 } }).addTo(map);
-          const mins = Math.ceil(dataMe.routes[0].duration / 60);
-          const dist = (dataMe.routes[0].distance / 1000).toFixed(1);
-          document.getElementById("my-eta").textContent = myCfg.emoji + " " + dist + " km · ~" + mins + " min";
-        }
-        if (dataPartner.routes?.[0]) {
-          L.geoJSON(dataPartner.routes[0].geometry, { style: { color: partnerCfg.color, weight: 4, opacity: 0.8 } }).addTo(map);
-          const mins = Math.ceil(dataPartner.routes[0].duration / 60);
-          const dist = (dataPartner.routes[0].distance / 1000).toFixed(1);
-          document.getElementById("partner-eta").textContent = partnerCfg.emoji + " " + dist + " km · ~" + mins + " min";
-        }
-        routeLayer = true;
-      } catch (e) { console.warn("Routing non disponibile:", e); }
-    }
-
-    function clearRoute() {
-      if (routeLayer) {
-        map.eachLayer((layer) => { if (layer instanceof L.GeoJSON) map.removeLayer(layer); });
-        routeLayer = null;
+        meetMarker = new google.maps.Marker({
+          position: midPos, map,
+          title: "⭐ Punto di incontro",
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 12,
+            fillColor: "#f59e0b",
+            fillOpacity: 1,
+            strokeColor: "#ffffff",
+            strokeWeight: 3
+          },
+          label: { text: "⭐", fontSize: "14px" }
+        });
+      } else {
+        meetMarker.setPosition(midPos);
       }
+
+      fetchDirections(myPos, midPos, directionsRendererMe, "my-eta", userConfig[USER_KEY]);
+      fetchDirections(partnerPos, midPos, directionsRendererPartner, "partner-eta", userConfig[PARTNER_KEY]);
+    }
+
+    function fetchDirections(origin, destination, renderer, etaId, cfg) {
+      directionsService.route({
+        origin,
+        destination,
+        travelMode: google.maps.TravelMode.WALKING
+      }, (result, status) => {
+        if (status === "OK") {
+          renderer.setDirections(result);
+          const leg = result.routes[0].legs[0];
+          document.getElementById(etaId).textContent =
+            cfg.emoji + " " + leg.distance.text + " · ~" + leg.duration.text;
+        }
+      });
+    }
+
+    function clearETA() {
       document.getElementById("my-eta").textContent = "";
       document.getElementById("partner-eta").textContent = "";
     }
 
+    // ── Helpers ───────────────────────────────────────────────────
     function fitBothMarkers() {
-      const markers = [myMarker, partnerMarker].filter(Boolean);
-      if (markers.length === 2) map.fitBounds(L.featureGroup(markers).getBounds().pad(0.3));
-      else if (markers.length === 1) map.setView(markers[0].getLatLng(), 15);
+      const positions = [myPos, partnerPos].filter(Boolean);
+      if (positions.length === 2) {
+        const bounds = new google.maps.LatLngBounds();
+        positions.forEach(p => bounds.extend(p));
+        map.fitBounds(bounds, 60);
+      } else if (positions.length === 1) {
+        map.setCenter(positions[0]);
+        map.setZoom(15);
+      }
     }
 
     function updateDistance() {
@@ -189,9 +256,13 @@
       const R = 6371000;
       const dLat = (partnerPos.lat - myPos.lat) * Math.PI / 180;
       const dLng = (partnerPos.lng - myPos.lng) * Math.PI / 180;
-      const a = Math.sin(dLat/2)**2 + Math.cos(myPos.lat*Math.PI/180) * Math.cos(partnerPos.lat*Math.PI/180) * Math.sin(dLng/2)**2;
+      const a = Math.sin(dLat/2)**2 +
+                Math.cos(myPos.lat*Math.PI/180) *
+                Math.cos(partnerPos.lat*Math.PI/180) *
+                Math.sin(dLng/2)**2;
       const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      document.getElementById("distance").textContent = "📏 " + (dist < 1000 ? Math.round(dist) + " m" : (dist/1000).toFixed(1) + " km");
+      document.getElementById("distance").textContent =
+        "📏 " + (dist < 1000 ? Math.round(dist) + " m" : (dist/1000).toFixed(1) + " km");
     }
 
     function showStatus(msg, type) {
@@ -200,15 +271,19 @@
       el.className = "status-badge " + (type || "ok");
     }
 
-    window.addEventListener("DOMContentLoaded", () => {
+    // ── Boot ──────────────────────────────────────────────────────
+    window.initGoogleMaps = function() {
       document.getElementById("btn-user-a").addEventListener("click", () => selectUser("user_a"));
       document.getElementById("btn-user-b").addEventListener("click", () => selectUser("user_b"));
       document.getElementById("btn-share").addEventListener("click", () => {
         if (isSharing) stopSharing(); else startSharing();
       });
       document.getElementById("btn-fit").addEventListener("click", fitBothMarkers);
-    });
+    };
   </script>
+
+  <!-- Google Maps API -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDFo78cFxqaYcrrL6Gw-Gqm1yL8aGbtcvI&callback=initGoogleMaps&libraries=places" async defer></script>
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@500&display=swap');
@@ -261,10 +336,6 @@
     #btn-share:active { transform:scale(.97); }
     #btn-fit { width:48px; padding:12px 8px; border:1px solid var(--border); border-radius:12px; font-size:18px; cursor:pointer; transition:all .15s; background:var(--surface2); color:var(--text); }
     #btn-fit:active { transform:scale(.97); }
-    .leaflet-tile-pane { filter:brightness(.85) saturate(.9); }
-    .leaflet-control-zoom a { background:var(--surface) !important; color:var(--text) !important; border-color:var(--border) !important; }
-    .leaflet-popup-content-wrapper { background:var(--surface) !important; color:var(--text) !important; border:1px solid var(--border); border-radius:10px !important; }
-    .leaflet-popup-tip { background:var(--surface) !important; }
   </style>
 </head>
 <body>
@@ -282,7 +353,6 @@
     <header>
       <div class="logo">shared<span>gps</span></div>
       <div id="my-label" style="font-size:13px;color:var(--muted);"></div>
-      <div id="partner-label" style="font-size:13px;color:var(--muted);"></div>
       <div style="flex:1"></div>
       <div id="distance"></div>
     </header>
