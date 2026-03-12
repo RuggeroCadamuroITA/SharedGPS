@@ -41,8 +41,12 @@
     let watchId = null;
     let isSharing = false;
 
-    const USER_KEY = "user_b";        // lei usa il browser
-    const PARTNER_KEY = "user_a";     // lui è l'app Android
+    // Se aperto con ?user=a (dall'app Android) = solo visualizzazione
+    // Se aperto senza parametro (link a lei) = lei condivide posizione
+    const params = new URLSearchParams(window.location.search);
+    const isViewOnly = params.get("user") === "a";
+    const USER_KEY = isViewOnly ? "user_a" : "user_b";
+    const PARTNER_KEY = isViewOnly ? "user_b" : "user_a";
 
     // Icone personalizzate
     const iconMe = L.divIcon({
@@ -96,6 +100,10 @@
     // Geolocalizzazione browser (lei)
     // ============================================================
     function startSharing() {
+      if (isViewOnly) {
+        showStatus("👁 Modalità visualizzazione — la tua posizione viene dall'app", "warn");
+        return;
+      }
       if (!navigator.geolocation) {
         showStatus("❌ Geolocalizzazione non supportata dal browser", "error");
         return;
@@ -290,7 +298,16 @@
       initMap();
       listenPartner();
 
+      if (isViewOnly) {
+        // Modalità app Android: solo visualizzazione
+        document.getElementById("btn-share").textContent = "👁 Solo visualizzazione";
+        document.getElementById("btn-share").style.background = "var(--surface2)";
+        document.getElementById("btn-share").style.color = "var(--muted)";
+        showStatus("👁 Stai guardando la mappa — la tua posizione viene dall'app", "warn");
+      }
+
       document.getElementById("btn-share").addEventListener("click", () => {
+        if (isViewOnly) return;
         if (isSharing) stopSharing(); else startSharing();
       });
 
